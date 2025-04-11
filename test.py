@@ -1,5 +1,3 @@
-test.py
- 
 from sys import argv
 import json,re,os
 from io import open
