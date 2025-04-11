@@ -1,0 +1,118 @@
+pipeline {
+    // назначаем агент Jenkins
+    agent { node { label 'abpm_test_linux_ssh' } }
+ 
+    options {
+    buildDiscarder(logRotator(
+        artifactDaysToKeepStr: '14',
+        artifactNumToKeepStr: '14',
+        daysToKeepStr: '14',
+        numToKeepStr: '40'))
+    timestamps()
+    disableConcurrentBuilds()
+    skipDefaultCheckout()
+    }
+   
+    // Получаем следующие переменные из веб-хука gitlab
+    triggers {
+        GenericTrigger(
+            causeString: 'Triggered by webhook',
+            genericVariables: [
+                    [key: 'Event', value: '$.event_type'], // тип события из веб-хука в GitLab
+                    [key: 'Repos', value: '$.repository.name'], // название проекта в Gitlab
+                    [key: 'Namespace', value: '$.project.namespace'], // название платформы
+                    [key: 'After', value:'$.object_attributes.target_branch'], // ветка, в которую происходит слияние
+                    [key: 'ProjectID', value: '$.object_attributes.target_project_id'], // ID проекта в GitLab
+                    [key: 'State', value: '$.object_attributes.state'], // состояние , скрипт запускаем если наступает событие merged
+                    [key: 'Iid', value: '$.object_attributes.iid'], // Номер merge request
+                    [key: 'Url_diff', value: '$.object_attributes.url'] // url-адрес страницы на Gitlab с изменениями после слияния
+ 
+            ],
+            regexpFilterExpression: '',
+            regexpFilterText: '',
+            printContributedVariables: true,
+            printPostContent: true,
+            token: 'terte1lterl2'
+            )
+    }
+    environment {
+            // в каких файлах искать изменения
+            files_to_check = "application.properties,CHANGELOG.md,start"
+            // креды для доступа в gitlab
+            BITBUCKET_CREDENTIAL_ID = 'cicd_abpm_developers'
+    }
+    stages {
+        stage('Check variables') {
+            steps {
+                script {
+                    sh "rm -Rf ${env.workspace}/*"
+                    sh(returnStdout: true, script: 'echo -n ---test4---')
+                    sh(returnStdout: true, script: 'echo -n target_branch is $After')
+                    sh(returnStdout: true, script: 'echo -n Environment is $ProjectID')
+                    sh(returnStdout: true, script: 'echo -n State is $State')
+                    sh(returnStdout: true, script: 'echo -n Namespace is $Namespace')
+                    sh(returnStdout: true, script: 'echo -n Url_diff is $Url_diff')
+                    sh(returnStdout: true, script: 'echo -n Iid is $Iid')
+                    sh(returnStdout: true, script: 'echo -n Repository is $Repos')
+                }
+            }
+        }
+        stage('Checkout cicd'){
+            steps{
+                dir("source"){
+                    git(
+                        url: "https://gitlab.rosbank.rus.socgen/small_platform/abpm/freedomapplication/testapp.git",
+                        credentialsId: "cicd_abpm_developers",
+                        branch: "dev")
+                    sh "ls -la"
+                }
+            }
+        }
+        stage('Get diff') {
+            steps {
+                dir("source"){
+                    withCredentials([
+                        usernamePassword(
+                                credentialsId: "cicd_abpm_developers",
+                                usernameVariable: 'GIT_USER',
+                                passwordVariable: 'GIT_PASS'
+                            ),
+                            string(
+                                credentialsId: "gitlab_token",
+                                variable: 'gitlab_token'
+                            )
+                    ]){
+                    script {
+                        // если состояние merged, то запускаем скрипт test.py
+                        if (State == 'merged') {ansiColor('xterm'){
+                            echo '---the State is merged---'
+                            sh """
+                            export gitlab_token="${gitlab_token}"
+                            hostname
+                            python test.py ${Repos} ${files_to_check} ${ProjectID} ${Iid} ${Url_diff} ${After} ${Namespace} ${GIT_USER} ${GIT_PASS} ${gitlab_token}
+                            ls -la
+                            """
+                            // отправляем email, адресатов указываем в emailext to: в двойных кавычках, через запятую
+                            if (fileExists('diff.html')) {
+                                echo '---file diff.html exists---'
+                                URLS = sh(returnStdout: true, script: 'cat diff.html').trim()
+                                emailext  to: "****",
+                                    mimeType: 'text/html',
+                                    recipientProviders: [[$class: 'RequesterRecipientProvider']],
+                                    subject: "[Jenkins] Diff from Gitlab, env: ${After}; repo:${Repos}; namespace: ${Namespace}",
+                                    body: "${URLS}"
+                            }
+                        }}
+                    }
+                    }
+                }
+            }
+        }
+        stage ('clean workspace') {
+            steps{
+                sh "rm -Rf ${env.workspace}/*"
+                echo "no clean"
+            }
+        }
+    }
+}
